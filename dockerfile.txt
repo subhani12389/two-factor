@@ -1,0 +1,59 @@
+# -------- Stage 1: Builder --------
+FROM python:3.11-slim AS builder
+
+WORKDIR /app
+
+# Install build tools if needed (optional, keep minimal)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install -r requirements.txt --no-cache-dir
+
+
+# -------- Stage 2: Runtime --------
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Environment: UTC timezone
+ENV TZ=UTC
+
+# Install system dependencies: cron + tzdata
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cron \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+# Configure timezone to UTC
+RUN ln -fs /usr/share/zoneinfo/Etc/UTC /etc/localtime && dpkg-reconfigure -f noninteractive tzdata
+
+# Copy installed deps from builder
+COPY --from=builder /usr/local/lib/python3.11 /usr/local/lib/python3.11
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy application code
+COPY app ./app
+COPY student_private.pem ./student_private.pem
+COPY student_public.pem ./student_public.pem
+COPY instructor_public.pem ./instructor_public.pem
+
+# Copy cron config & scripts
+COPY cron/2fa-cron /etc/cron.d/2fa-cron
+COPY scripts/log_2fa_cron.py ./scripts/log_2fa_cron.py
+
+# Permissions for cron
+RUN chmod 0644 /etc/cron.d/2fa-cron
+
+# Apply cron job
+RUN crontab /etc/cron.d/2fa-cron
+
+# Create volume mount points
+RUN mkdir -p /data /cron && chmod 755 /data /cron
+
+EXPOSE 8080
+
+# Start cron and FastAPI (uvicorn)
+CMD cron && uvicorn app.main:app --host 0.0.0.0 --port 8080
